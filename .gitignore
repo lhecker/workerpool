@@ -1,0 +1,21 @@
+# Linux
+*~
+
+# OSX
+._*
+*.DS_Store
+
+# Windows
+Desktop.ini
+Thumbs.db
+
+# Go
+*.exe
+*.out
+*.test
+
+# Visual Studio Code
+/.vscode
+
+# JetBrains
+/.idea
