@@ -17,9 +17,6 @@ type Pool interface {
 
 	// NewBatch can be used to submit a bunch of jobs and wait for their completion.
 	NewBatch() Batch
-
-	// Submit synchronously submits the given function to the worker pool for execution.
-	Submit(f func() error) error
 }
 
 // Batch can be used to submit a bunch of work and wait for its completion.
@@ -34,18 +31,23 @@ type Batch interface {
 }
 
 // NewPool creates a new worker pool.
-func NewPool(size int) Pool {
-	if size == 0 {
-		size = runtime.GOMAXPROCS(0)
+func NewPool(options ...Option) Pool {
+	numCPU := runtime.NumCPU()
+
+	opts := &poolOptions{
+		poolSize: numCPU,
+	}
+	for _, apply := range options {
+		apply(opts)
 	}
 
 	s := &pool{
-		queue: make(chan job, size),
+		queue: make(chan job, opts.queueSize),
 	}
 
-	for i := 0; i < size; i++ {
+	for i := 0; i < opts.poolSize; i++ {
 		s.wg.Add(1)
-		go s.worker()
+		go s.worker(opts)
 	}
 
 	return s
@@ -53,16 +55,14 @@ func NewPool(size int) Pool {
 
 type pool struct {
 	queue chan job
-	done  uint32
 	wg    sync.WaitGroup
 }
 
-func (s *pool) worker() {
+func (s *pool) worker(opts *poolOptions) {
 	defer s.wg.Done()
 
-	// Lock this goroutine to an actual thread beforehand already.
-	// That way long-running cgo calls will not cause this to happen later on.
-	runtime.LockOSThread()
+	opts.runSetupHooks()
+	defer opts.runTeardownHooks()
 
 	for job := range s.queue {
 		job.execute()
@@ -76,56 +76,53 @@ func (s *pool) Close() {
 
 func (s *pool) NewBatch() Batch {
 	return &batch{
-		pool:   s,
-		shared: &shared{},
+		pool: s,
 	}
-}
-
-func (s *pool) Submit(f func() error) error {
-	return s.NewBatch().Submit(f).Wait()
 }
 
 type batch struct {
-	pool   *pool
-	shared *shared
-}
-
-func (s *batch) Submit(f func() error) Batch {
-	s.shared.wg.Add(1)
-	s.pool.queue <- job{
-		fn:     f,
-		shared: s.shared,
-	}
-	return s
-}
-
-func (s *batch) Wait() error {
-	s.shared.wg.Wait()
-	return s.shared.err
-}
-
-type shared struct {
+	pool    *pool
 	wg      sync.WaitGroup
 	errOnce sync.Once
 	err     error
 }
 
+func (s *batch) Submit(f func() error) Batch {
+	s.wg.Add(1)
+	s.pool.queue <- job{
+		batch: s,
+		fn:    f,
+	}
+	return s
+}
+
+func (s *batch) Wait() error {
+	s.wg.Wait()
+	return s.err
+}
+
 type job struct {
-	fn     func() error
-	shared *shared
+	batch *batch
+	fn    func() error
 }
 
 func (s job) execute() {
-	defer s.shared.wg.Done()
+	defer s.batch.wg.Done()
 
-	if s.shared.err != nil {
+	// NOTE: This is a voluntary race condition and might trigger Go's race detector.
+	//
+	// What I'd like to do here is to read .err using relaxed memory ordering to check whether it
+	// has "probably" been set already. On all commonly used platforms this works reasonably well.
+	// Especially since we only write .err when protected by .errOnce and only "really" read
+	// and use its value after the batch's WaitGroup has returned from Wait().
+	if s.batch.err != nil {
 		return
 	}
 
 	err := s.fn()
 	if err != nil {
-		s.shared.errOnce.Do(func() {
-			s.shared.err = err
+		s.batch.errOnce.Do(func() {
+			s.batch.err = err
 		})
 	}
 }
