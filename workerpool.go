@@ -1,8 +1,10 @@
 package workerpool
 
 import (
+	"context"
 	"runtime"
 	"sync"
+	"sync/atomic"
 )
 
 // Pool represents a worker pool suitable for continued use with cgo calls.
@@ -15,8 +17,14 @@ type Pool interface {
 	// - called concurrently with any other function (especially Submit())
 	Close()
 
-	// NewBatch can be used to submit a bunch of jobs and wait for their completion.
+	// NewBatch can be used to submit a bunch of jobs to the pool and wait for their completion.
 	NewBatch() Batch
+
+	// NewBatchWithContext is identical to NewBatch, except that it returns a context derived from the given one.
+	//
+	// The derived Context is canceled the first time a function passed to Submit()
+	// returns a non-nil error or the first time Wait returns, whichever occurs first.
+	NewBatchWithContext(ctx context.Context) (Batch, context.Context)
 }
 
 // Batch can be used to submit a bunch of work and wait for its completion.
@@ -80,11 +88,21 @@ func (s *pool) NewBatch() Batch {
 	}
 }
 
+func (s *pool) NewBatchWithContext(ctx context.Context) (Batch, context.Context) {
+	ctx, cancel := context.WithCancel(ctx)
+	return &batch{
+		pool:   s,
+		cancel: cancel,
+	}, ctx
+}
+
 type batch struct {
-	pool    *pool
-	wg      sync.WaitGroup
-	errOnce sync.Once
-	err     error
+	pool   *pool
+	cancel context.CancelFunc
+
+	wg     sync.WaitGroup
+	err    error
+	hasErr uint32
 }
 
 func (s *batch) Submit(f func() error) Batch {
@@ -98,6 +116,9 @@ func (s *batch) Submit(f func() error) Batch {
 
 func (s *batch) Wait() error {
 	s.wg.Wait()
+	if s.cancel != nil {
+		s.cancel()
+	}
 	return s.err
 }
 
@@ -107,22 +128,14 @@ type job struct {
 }
 
 func (s job) execute() {
-	defer s.batch.wg.Done()
-
-	// NOTE: This is a voluntary race condition and might trigger Go's race detector.
-	//
-	// What I'd like to do here is to read .err using relaxed memory ordering to check whether it
-	// has "probably" been set already. On all commonly used platforms this works reasonably well.
-	// Especially since we only write .err when protected by .errOnce and only "really" read
-	// and use its value after the batch's WaitGroup has returned from Wait().
-	if s.batch.err != nil {
-		return
-	}
+	batch := s.batch
+	defer batch.wg.Done()
 
 	err := s.fn()
-	if err != nil {
-		s.batch.errOnce.Do(func() {
-			s.batch.err = err
-		})
+	if err != nil && atomic.CompareAndSwapUint32(&batch.hasErr, 0, 1) {
+		batch.err = err
+		if batch.cancel != nil {
+			batch.cancel()
+		}
 	}
 }

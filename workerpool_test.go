@@ -1,6 +1,7 @@
 package workerpool
 
 import (
+	"context"
 	"errors"
 	"runtime"
 	"sync/atomic"
@@ -9,7 +10,7 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func TestClose(t *testing.T) {
+func TestPoolClose(t *testing.T) {
 	assert := assert.New(t)
 	goroutinesBefore := runtime.NumGoroutine()
 
@@ -20,7 +21,29 @@ func TestClose(t *testing.T) {
 	assert.InDelta(goroutinesBefore, runtime.NumGoroutine(), 5)
 }
 
-func TestSubmit(t *testing.T) {
+func TestNewBatchWithContext(t *testing.T) {
+	assert := assert.New(t)
+
+	pool := NewPool(PoolSize(1))
+	batch, ctx := pool.NewBatchWithContext(context.Background())
+	counter := uint32(0)
+
+	batch.Submit(func() error {
+		atomic.AddUint32(&counter, 1)
+		return errors.New("test")
+	})
+	batch.Submit(func() error {
+		atomic.AddUint32(&counter, 1)
+		return ctx.Err()
+	})
+
+	err := batch.Wait()
+	assert.Equal(ctx.Err(), context.Canceled)
+	assert.EqualError(err, "test")
+	assert.EqualValues(1, counter)
+}
+
+func TestBatchSubmit(t *testing.T) {
 	assert := assert.New(t)
 
 	pool := NewPool()
