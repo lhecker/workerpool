@@ -14,17 +14,23 @@ func TestPoolClose(t *testing.T) {
 	assert := assert.New(t)
 	goroutinesBefore := runtime.NumGoroutine()
 
-	pool := NewPool(PoolSize(10))
+	pool := NewPool(
+		WithBlockingFifoQueue(0),
+		WithPoolSize(10),
+	)
 	assert.InDelta(goroutinesBefore+10, runtime.NumGoroutine(), 5)
 
 	pool.Close()
 	assert.InDelta(goroutinesBefore, runtime.NumGoroutine(), 5)
 }
 
-func TestNewBatchWithContext(t *testing.T) {
+func TestNewBatchWithContextFifo(t *testing.T) {
 	assert := assert.New(t)
 
-	pool := NewPool(PoolSize(1))
+	pool := NewPool(
+		WithBlockingFifoQueue(0),
+		WithPoolSize(1),
+	)
 	batch, ctx := pool.NewBatchWithContext(context.Background())
 	counter := uint32(0)
 
@@ -40,13 +46,15 @@ func TestNewBatchWithContext(t *testing.T) {
 	err := batch.Wait()
 	assert.Equal(ctx.Err(), context.Canceled)
 	assert.EqualError(err, "test")
-	assert.EqualValues(1, counter)
+	assert.EqualValues(2, counter)
 }
 
-func TestBatchSubmit(t *testing.T) {
+func TestBatchSubmitFifo(t *testing.T) {
 	assert := assert.New(t)
 
-	pool := NewPool()
+	pool := NewPool(
+		WithBlockingFifoQueue(0),
+	)
 	batch := pool.NewBatch()
 	counter := uint32(0)
 
@@ -64,29 +72,110 @@ func TestBatchSubmit(t *testing.T) {
 	assert.EqualValues(10, counter)
 }
 
-func BenchmarkSubmit(b *testing.B) {
+func BenchmarkSubmitFifo(b *testing.B) {
 	pool := NewPool(
-		SetupHooks(runtime.LockOSThread),
-		TeardownHooks(runtime.UnlockOSThread),
+		WithBlockingFifoQueue(2*runtime.GOMAXPROCS(0)),
+		WithSetupHooks(runtime.LockOSThread),
+		WithTeardownHooks(runtime.UnlockOSThread),
 	)
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		pool.NewBatch().Submit(func() error {
+		_ = pool.NewBatch().Submit(func() error {
 			return nil
 		}).Wait()
 	}
 }
 
-func BenchmarkSubmitParallel(b *testing.B) {
+func BenchmarkSubmitParallelFifo(b *testing.B) {
 	pool := NewPool(
-		SetupHooks(runtime.LockOSThread),
-		TeardownHooks(runtime.UnlockOSThread),
+		WithBlockingFifoQueue(2*runtime.GOMAXPROCS(0)),
+		WithSetupHooks(runtime.LockOSThread),
+		WithTeardownHooks(runtime.UnlockOSThread),
 	)
 
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
-			pool.NewBatch().Submit(func() error {
+			_ = pool.NewBatch().Submit(func() error {
+				return nil
+			}).Wait()
+		}
+	})
+}
+
+func TestNewBatchWithContextLifo(t *testing.T) {
+	assert := assert.New(t)
+
+	pool := NewPool(
+		WithBoundedLifoQueue(16),
+		WithPoolSize(1),
+	)
+	batch, ctx := pool.NewBatchWithContext(context.Background())
+	counter := uint32(0)
+
+	batch.Submit(func() error {
+		atomic.AddUint32(&counter, 1)
+		return errors.New("test")
+	})
+	batch.Submit(func() error {
+		atomic.AddUint32(&counter, 1)
+		return ctx.Err()
+	})
+
+	err := batch.Wait()
+	assert.Equal(ctx.Err(), context.Canceled)
+	assert.EqualError(err, "test")
+	assert.EqualValues(2, counter)
+}
+
+func TestBatchSubmitLifo(t *testing.T) {
+	assert := assert.New(t)
+
+	pool := NewPool(
+		WithBoundedLifoQueue(16),
+	)
+	batch := pool.NewBatch()
+	counter := uint32(0)
+
+	for i := 0; i < 10; i++ {
+		batch.Submit(func() error {
+			if atomic.AddUint32(&counter, 1) == 10 {
+				return errors.New("test")
+			}
+			return nil
+		})
+	}
+
+	err := batch.Wait()
+	assert.EqualError(err, "test")
+	assert.EqualValues(10, counter)
+}
+
+func BenchmarkSubmitLifo(b *testing.B) {
+	pool := NewPool(
+		WithBoundedLifoQueue(2*runtime.GOMAXPROCS(0)),
+		WithSetupHooks(runtime.LockOSThread),
+		WithTeardownHooks(runtime.UnlockOSThread),
+	)
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = pool.NewBatch().Submit(func() error {
+			return nil
+		}).Wait()
+	}
+}
+
+func BenchmarkSubmitParallelLifo(b *testing.B) {
+	pool := NewPool(
+		WithBoundedLifoQueue(2*runtime.GOMAXPROCS(0)),
+		WithSetupHooks(runtime.LockOSThread),
+		WithTeardownHooks(runtime.UnlockOSThread),
+	)
+
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			_ = pool.NewBatch().Submit(func() error {
 				return nil
 			}).Wait()
 		}

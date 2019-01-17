@@ -3,10 +3,10 @@ package workerpool
 // Option sets pool options in the call to NewPool.
 type Option func(*poolOptions)
 
-// PoolSize sets the size of the pool.
+// WithPoolSize sets the size of the pool.
 //
 // This function panics if a value of 0 or less is given.
-func PoolSize(size int) Option {
+func WithPoolSize(size int) Option {
 	if size <= 0 {
 		panic("invalid pool size")
 	}
@@ -16,31 +16,39 @@ func PoolSize(size int) Option {
 	}
 }
 
-// QueueSize sets the depth of the worker channel.
+// WithBlockingFifoQueue sets the size of the pool.
 //
-// This function panics if a value of less than 0 is given.
-// Normally you never need to specify this option.
-func QueueSize(size int) Option {
-	if size < 0 {
-		panic("invalid queue size")
-	}
-
+// This function panics if a value of 0 or less is given.
+func WithBlockingFifoQueue(size int) Option {
 	return func(o *poolOptions) {
-		o.queueSize = size
+		o.queue = newFifoQueue(size)
 	}
 }
 
-// SetupHooks adds the given callbacks to the list of functions to be
+// WithBoundedLifoQueue sets the size of the pool.
+//
+// This function panics if a value of 0 or less is given.
+func WithBoundedLifoQueue(size int) Option {
+	if size == 0 {
+		panic("invalid size")
+	}
+
+	return func(o *poolOptions) {
+		o.queue = newLifoQueue(size)
+	}
+}
+
+// WithSetupHooks adds the given callbacks to the list of functions to be
 // executed when a worker is spawned and before any jobs are processed.
-func SetupHooks(hooks ...func()) Option {
+func WithSetupHooks(hooks ...func()) Option {
 	return func(o *poolOptions) {
 		o.setupHooks = append(o.setupHooks, hooks...)
 	}
 }
 
-// TeardownHooks adds the given callbacks to the list of functions to be
+// WithTeardownHooks adds the given callbacks to the list of functions to be
 // executed when a worker exits and after any jobs are processed.
-func TeardownHooks(hooks ...func()) Option {
+func WithTeardownHooks(hooks ...func()) Option {
 	return func(o *poolOptions) {
 		o.teardownHooks = append(o.teardownHooks, hooks...)
 	}
@@ -48,7 +56,7 @@ func TeardownHooks(hooks ...func()) Option {
 
 type poolOptions struct {
 	poolSize      int
-	queueSize     int
+	queue         queue
 	setupHooks    []func()
 	teardownHooks []func()
 }

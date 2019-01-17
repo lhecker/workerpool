@@ -2,9 +2,14 @@ package workerpool
 
 import (
 	"context"
+	"errors"
 	"runtime"
 	"sync"
 	"sync/atomic"
+)
+
+var (
+	ErrBatchCanceled = errors.New("batch canceled")
 )
 
 // Pool represents a worker pool suitable for continued use with cgo calls.
@@ -38,19 +43,27 @@ type Batch interface {
 	Wait() error
 }
 
+type queue interface {
+	Close()
+	Push(j job)
+	Pop() (job, bool)
+}
+
 // NewPool creates a new worker pool.
 func NewPool(options ...Option) Pool {
-	numCPU := runtime.NumCPU()
-
-	opts := &poolOptions{
-		poolSize: numCPU,
-	}
+	opts := &poolOptions{}
 	for _, apply := range options {
 		apply(opts)
 	}
+	if opts.poolSize == 0 {
+		opts.poolSize = runtime.NumCPU()
+	}
+	if opts.queue == nil {
+		opts.queue = newFifoQueue(0)
+	}
 
 	s := &pool{
-		queue: make(chan job, opts.queueSize),
+		queue: opts.queue,
 	}
 
 	for i := 0; i < opts.poolSize; i++ {
@@ -62,7 +75,7 @@ func NewPool(options ...Option) Pool {
 }
 
 type pool struct {
-	queue chan job
+	queue queue
 	wg    sync.WaitGroup
 }
 
@@ -72,13 +85,18 @@ func (s *pool) worker(opts *poolOptions) {
 	opts.runSetupHooks()
 	defer opts.runTeardownHooks()
 
-	for job := range s.queue {
+	for {
+		job, ok := s.queue.Pop()
+		if !ok {
+			break
+		}
+
 		job.execute()
 	}
 }
 
 func (s *pool) Close() {
-	close(s.queue)
+	s.queue.Close()
 	s.wg.Wait()
 }
 
@@ -107,10 +125,10 @@ type batch struct {
 
 func (s *batch) Submit(f func() error) Batch {
 	s.wg.Add(1)
-	s.pool.queue <- job{
+	s.pool.queue.Push(job{
 		batch: s,
 		fn:    f,
-	}
+	})
 	return s
 }
 
@@ -120,6 +138,15 @@ func (s *batch) Wait() error {
 		s.cancel()
 	}
 	return s.err
+}
+
+func (s *batch) setError(err error) {
+	if atomic.CompareAndSwapUint32(&s.hasErr, 0, 1) {
+		s.err = err
+		if s.cancel != nil {
+			s.cancel()
+		}
+	}
 }
 
 type job struct {
@@ -132,10 +159,7 @@ func (s job) execute() {
 	defer batch.wg.Done()
 
 	err := s.fn()
-	if err != nil && atomic.CompareAndSwapUint32(&batch.hasErr, 0, 1) {
-		batch.err = err
-		if batch.cancel != nil {
-			batch.cancel()
-		}
+	if err != nil {
+		batch.setError(err)
 	}
 }
